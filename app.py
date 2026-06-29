@@ -282,7 +282,7 @@ def ensure_preload_started():
 
 
 def read_users():
-    """读取用户表，带短时缓存，返回用户权限信息"""
+    """读取用户表，带短时缓存，返回用户权限信息。API故障时回退到硬编码管理员确保系统可用。"""
     now = time.time()
     if _users_cache["data"] is not None and (now - _users_cache["timestamp"]) < USER_CACHE_TTL:
         return _users_cache["data"]
@@ -290,30 +290,53 @@ def read_users():
     url = f"{BASE_URL}/files/{USER_FILE_ID}/{USER_SHEET_ID}/A2:F200"
     resp = HTTP.get(url, headers=get_headers(), timeout=_HTTP_TIMEOUT)
     users = []
+    api_ok = False
     if resp.status_code == 200:
         data = resp.json()
-        rows = data.get("gridData", {}).get("rows", [])
-        for row in rows:
-            values = row.get("values", [])
-            row_data = [parse_cell_value(v.get("cellValue")) for v in values]
-            if len(row_data) >= 3 and row_data[0] and row_data[1]:
-                role = row_data[3].strip() if len(row_data) >= 4 else ""
-                department = row_data[4].strip() if len(row_data) >= 5 else ""
-                permission_text = row_data[5].strip() if len(row_data) >= 6 else ""
-                is_admin = role == "管理员" or permission_text == "能操作所有数据"
-                is_manager = role == "经理" or permission_text == "能操作本部门所有数据"
-                access_level = "admin" if is_admin else ("department" if is_manager else "self")
-                users.append({
-                    "name": row_data[0],
-                    "employee_id": row_data[1],
-                    "password": row_data[2],
-                    "is_admin": is_admin,
-                    "is_manager": is_manager,
-                    "role": role,
-                    "department": department,
-                    "access_level": access_level,
-                    "permission": permission_text
-                })
+        if data.get("code") and data.get("code") != 0:
+            print(f"[read_users] 腾讯API错误 code={data.get('code')}: {data.get('message', '')}", flush=True)
+        else:
+            api_ok = True
+            rows = data.get("gridData", {}).get("rows", [])
+            for row in rows:
+                values = row.get("values", [])
+                row_data = [parse_cell_value(v.get("cellValue")) for v in values]
+                if len(row_data) >= 3 and row_data[0] and row_data[1]:
+                    role = row_data[3].strip() if len(row_data) >= 4 else ""
+                    department = row_data[4].strip() if len(row_data) >= 5 else ""
+                    permission_text = row_data[5].strip() if len(row_data) >= 6 else ""
+                    is_admin = role == "管理员" or permission_text == "能操作所有数据"
+                    is_manager = role == "经理" or permission_text == "能操作本部门所有数据"
+                    access_level = "admin" if is_admin else ("department" if is_manager else "self")
+                    users.append({
+                        "name": row_data[0],
+                        "employee_id": row_data[1],
+                        "password": row_data[2],
+                        "is_admin": is_admin,
+                        "is_manager": is_manager,
+                        "role": role,
+                        "department": department,
+                        "access_level": access_level,
+                        "permission": permission_text
+                    })
+    else:
+        print(f"[read_users] HTTP错误 status={resp.status_code}", flush=True)
+
+    if not api_ok and not users:
+        admin_pwd = os.environ.get('ADMIN_PASSWORD', '') or ACCESS_PASSWORD
+        users.append({
+            "name": "李刚",
+            "employee_id": ADMIN_EMPLOYEE_ID,
+            "password": admin_pwd,
+            "is_admin": True,
+            "is_manager": False,
+            "role": "管理员",
+            "department": "",
+            "access_level": "admin",
+            "permission": "能操作所有数据"
+        })
+        print("[read_users] 腾讯API不可用，已启用管理员fallback", flush=True)
+
     _users_cache["data"] = users
     _users_cache["timestamp"] = now
     return users
