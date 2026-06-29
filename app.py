@@ -975,9 +975,8 @@ def get_models():
 
 
 # 计算结果缓存：避免重复计算
-_calc_result_cache = {"key": None, "result": None, "timestamp": 0}  # 计算结果缓存
-_CALC_CACHE_TTL = 300  # 计算结果缓存TTL（5分钟）
-_CALC_CACHE_TTL = 30  # 30秒缓存
+_calc_result_cache_app = {"key": None, "result": None, "timestamp": 0}  # 计算结果缓存（app层）
+_CALC_CACHE_TTL_APP = 600  # 10分钟缓存，与calc_engine保持一致
 
 # 待处理行缓存
 _pending_row_cache = {"data": None, "timestamp": 0}
@@ -1083,12 +1082,12 @@ def calculate_date():
         # 1. 缓存快速路径检查（在计算之前）
         cache_key = f"{model}:{tonnage}:{expected_date}"
         if not force_refresh:
-            if (_calc_result_cache.get("key") == cache_key
-                and _calc_result_cache.get("result")
-                and time.time() - _calc_result_cache.get("timestamp", 0) < _CALC_CACHE_TTL):
+            if (_calc_result_cache_app.get("key") == cache_key
+                and _calc_result_cache_app.get("result")
+                and time.time() - _calc_result_cache_app.get("timestamp", 0) < _CALC_CACHE_TTL_APP):
                 return jsonify({
                     "success": True,
-                    "calculated_date": _calc_result_cache["result"],
+                    "calculated_date": _calc_result_cache_app["result"],
                     "row_index": int(pending_row_index) if pending_row_index else 0,
                     "message": ""
                 })
@@ -1147,9 +1146,9 @@ def calculate_date():
 
         # 5. 更新缓存（内存操作）
         if not force_refresh:
-            _calc_result_cache["key"] = cache_key
-            _calc_result_cache["result"] = calculated_date
-            _calc_result_cache["timestamp"] = now
+            _calc_result_cache_app["key"] = cache_key
+            _calc_result_cache_app["result"] = calculated_date
+            _calc_result_cache_app["timestamp"] = now
 
         return jsonify({
             "success": True,

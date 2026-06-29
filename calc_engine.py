@@ -236,8 +236,8 @@ _token_status = "unknown"
 _token_status_lock = threading.Lock()
 
 # 缓存TTL配置
-CACHE_TTL = 300  # 5分钟（按需缓存）
-PRELOAD_INTERVAL = 300  # 后台每300秒（5分钟）预抓取一次
+CACHE_TTL = 3600  # 1小时（按需缓存）
+PRELOAD_INTERVAL = 14400  # 后台每14400秒（4小时）预抓取一次，控制API调用量在2万/月以内
 
 
 def _set_token_status(status):
@@ -388,10 +388,12 @@ def get_sheet_data(sheet_id, start_row, capacity_col, limit_cell, row_count):
 
 # 上限日期缓存
 _limit_date_cache = {}
-_LIMIT_DATE_CACHE_TTL = 300
+_LIMIT_DATE_CACHE_TTL = 14400  # 4小时，与预加载间隔一致
 
-# 计算结果缓存
+# 计算结果缓存（型号+吨位+期望日期 → 结果）
 _calc_result_cache = {}
+_calc_result_cache_lock = threading.Lock()
+_CALC_RESULT_CACHE_TTL = 600  # 10分钟
 
 # 空行缓存
 _empty_row_cache = {"row": 0, "timestamp": 0}
@@ -416,7 +418,7 @@ def _read_limit_date(sheet_id, limit_cell):
 # 配置表缓存
 _model_config_cache = {}
 _model_config_cache_time = 0
-MODEL_CONFIG_CACHE_TTL = 300
+MODEL_CONFIG_CACHE_TTL = 3600  # 1小时
 
 
 def _load_model_configs_from_sheet():
@@ -469,7 +471,8 @@ def _get_model_config(model):
     return None
 
 
-def calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capacity=None):
+def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capacity=None):
+    """实际计算可发货日期（无缓存）"""
     config = _get_model_config(model)
     if not config:
         return "请联系商务支持", f"型号 {model} 暂无排产数据，请检查型号是否正确"
@@ -547,6 +550,28 @@ def calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capa
     if result_date == expected_date:
         return expected_date_str, ""
     return result_date.strftime("%Y-%m-%d"), ""
+
+
+def calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capacity=None):
+    """计算可发货日期（带计算结果缓存）"""
+    # 1. 计算结果缓存快速路径
+    cache_key = f"{model}:{tonnage_str}:{expected_date_str}"
+    now = time_module.time()
+    with _calc_result_cache_lock:
+        if cache_key in _calc_result_cache:
+            entry = _calc_result_cache[cache_key]
+            if now - entry["ts"] < _CALC_RESULT_CACHE_TTL:
+                return entry["result"]
+
+    # 2. 实际计算
+    result = _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capacity)
+
+    # 3. 写入缓存（仅成功计算时）
+    if result[0]:  # 有可发货日期或错误提示时缓存
+        with _calc_result_cache_lock:
+            _calc_result_cache[cache_key] = {"result": result, "ts": now}
+
+    return result
 
 
 def clear_cache():
