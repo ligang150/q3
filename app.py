@@ -511,37 +511,60 @@ def get_next_empty_row(sheet_id, start_from=2, max_batches=4):
 
 def _find_first_empty_row_in_column_a():
     """提交排队时实时扫描A列，找到第一个真正的空行（1-based）
-    不使用缓存，每次都是最新数据，避免多人并发时返回同一行号导致覆盖"""
-    batch_size = 200
-    for offset in range(0, 2000, batch_size):
-        start = offset + 1  # 1-based
-        end = offset + batch_size
-        range_str = f"A{start}:A{end}"
-        grid_data = read_sheet_range(SHEET_ID, range_str)
-        rows = grid_data.get("rows", [])
+    不使用缓存，每次都是最新数据。API失败自动重试，最终失败时返回None让调用方扩容"""
+    batch_size = 100
+    max_retries = 2
 
-        if not rows:
-            break
+    for attempt in range(max_retries + 1):
+        all_batches_empty = True  # 标记是否所有批次都没有数据
+        for offset in range(0, 2000, batch_size):
+            start = offset + 1  # 1-based
+            end = offset + batch_size
+            range_str = f"A{start}:A{end}"
+            grid_data = read_sheet_range(SHEET_ID, range_str)
+            rows = grid_data.get("rows", [])
 
-        for i in range(len(rows)):
-            row = rows[i]
-            actual_row = start + i
-            if actual_row < 2:
+            if not rows:
+                # API返回空：如果这是第一个批次且第一次尝试，可能是API故障，重试整个扫描
+                if offset == 0 and attempt < max_retries:
+                    time.sleep(0.3)
+                    break  # 跳出内层循环，触发外层重试
+                # 非第一个批次返回空，说明已到表格末尾，下一行是空行
+                if offset > 0:
+                    return start
+                # 第一个批次多次重试后仍为空，表格可能真的没有数据或API故障
+                if attempt >= max_retries:
+                    # 兜底：假设表格只有表头，从第2行开始
+                    return 2
                 continue
-            has_data = False
-            for v in row.get("values", []):
-                cv = v.get("cellValue")
-                if cv:
-                    text = parse_cell_value(cv)
-                    if text.strip():
-                        has_data = True
-                        break
-            if not has_data:
-                return actual_row
 
-        if len(rows) < batch_size:
-            # 到达表格末尾，下一行是空行
-            return start + len(rows)
+            all_batches_empty = False
+
+            for i in range(len(rows)):
+                row = rows[i]
+                actual_row = start + i
+                if actual_row < 2:
+                    continue
+                has_data = False
+                for v in row.get("values", []):
+                    cv = v.get("cellValue")
+                    if cv:
+                        text = parse_cell_value(cv)
+                        if text.strip():
+                            has_data = True
+                            break
+                if not has_data:
+                    return actual_row
+
+            if len(rows) < batch_size:
+                # 到达表格末尾，下一行是空行
+                return start + len(rows)
+
+        # 所有批次扫描完毕，没找到空行
+        if all_batches_empty and attempt < max_retries:
+            time.sleep(0.3)
+            continue
+        return None
 
     return None  # 表格已满，需要扩容
 
@@ -1234,42 +1257,56 @@ def create_order():
         target_row = _find_first_empty_row_in_column_a()
 
         if target_row is None:
-            # 表格已满，自动添加500行
-            url = f"{BASE_URL}/files/{FILE_ID}"
-            resp = HTTP.get(url, headers=get_headers(), timeout=_HTTP_TIMEOUT)
-            if resp.status_code == 200:
-                file_data = resp.json()
-                sheets = file_data.get("data", {}).get("sheets", [])
-                current_row_count = 0
-                for s in sheets:
-                    if s.get("sheetID") == SHEET_ID:
-                        current_row_count = s.get("rowCount", 0)
-                        break
-                if current_row_count <= 0:
-                    for s in sheets:
-                        if s.get("sheetID") == SHEET_ID:
-                            gp = s.get("gridProperties", {})
-                            current_row_count = gp.get("rowCount", 0)
-                            break
-                rows_to_add = 500
-                body = {
-                    "requests": [{
-                        "insertDimension": {
-                            "range": {
-                                "sheetID": SHEET_ID,
-                                "dimension": "ROWS",
-                                "startIndex": current_row_count + 1,
-                                "endIndex": current_row_count + 1 + rows_to_add
+            # 实时扫描失败/表格确实已满，用 get_next_empty_row 作为兜底
+            try:
+                fallback_row = get_next_empty_row(SHEET_ID, start_from=2, max_batches=4)
+                if fallback_row >= 2:
+                    print(f"[create_order] 实时扫描失败，使用 get_next_empty_row 兜底: row={fallback_row}", flush=True)
+                    target_row = fallback_row
+            except Exception as e:
+                print(f"[create_order] get_next_empty_row 兜底失败: {e}", flush=True)
+
+        if target_row is None:
+            # 需要扩容：获取当前表格总行数并添加行
+            try:
+                url = f"{BASE_URL}/files/{FILE_ID}"
+                resp = HTTP.get(url, headers=get_headers(), timeout=_HTTP_TIMEOUT)
+                if resp.status_code == 200:
+                    file_data = resp.json()
+                    if file_data.get("code", 0) == 0:
+                        sheets = file_data.get("data", {}).get("sheets", [])
+                        current_row_count = 0
+                        for s in sheets:
+                            if s.get("sheetID") == SHEET_ID:
+                                current_row_count = s.get("rowCount", s.get("gridProperties", {}).get("rowCount", 0))
+                                break
+                        if current_row_count > 0:
+                            rows_to_add = 500
+                            body = {
+                                "requests": [{
+                                    "insertDimension": {
+                                        "range": {
+                                            "sheetID": SHEET_ID,
+                                            "dimension": "ROWS",
+                                            "startIndex": current_row_count + 1,
+                                            "endIndex": current_row_count + 1 + rows_to_add
+                                        }
+                                    }
+                                }]
                             }
-                        }
-                    }]
-                }
-                expand_resp = batch_update(body)
-                if expand_resp.status_code == 200:
-                    expand_result = expand_resp.json()
-                    if expand_result.get("ret") == 0 or "responses" in expand_result:
-                        _sheet_row_count_cache["count"] = current_row_count + rows_to_add
-                        target_row = current_row_count + 1
+                            expand_resp = batch_update(body)
+                            if expand_resp.status_code == 200:
+                                expand_result = expand_resp.json()
+                                if expand_result.get("ret") == 0 or "responses" in expand_result:
+                                    _sheet_row_count_cache["count"] = current_row_count + rows_to_add
+                                    target_row = current_row_count + 1
+                                    print(f"[create_order] 扩容成功: {rows_to_add}行, 写入行={target_row}", flush=True)
+                    else:
+                        print(f"[create_order] 获取文件信息API错误: code={file_data.get('code')} {file_data.get('message', '')}", flush=True)
+                else:
+                    print(f"[create_order] 获取文件信息HTTP错误: {resp.status_code}", flush=True)
+            except Exception as e:
+                print(f"[create_order] 扩容异常: {e}", flush=True)
 
             if target_row is None:
                 return jsonify({"success": False, "error": "表格已满且扩容失败，请联系管理员"})
