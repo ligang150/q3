@@ -542,17 +542,20 @@ async function calculateDate() {
             // 检查E列结果是否为有效日期
             const isDate = calcDate && calcDate.match(/\d{4}-\d{2}-\d{2}/);
             if (!isDate && calcDate) {
-                // 公式返回非日期文本（如错误信息）
-                queueDateInput.style.display = 'none';
+                queueDateInput.style.display = '';
+                queueDateInput.disabled = false;
+                queueDateInput.style.background = '#fff';
+                queueDateInput.style.color = '';
+                queueDateInput.style.cursor = 'text';
+                queueDateInput.placeholder = '产能不足，请联系商务支持后填写';
+                queueDateInput.value = '';
                 const parent = queueDateInput.parentNode;
                 const oldHint2 = parent.querySelector('.queue-date-hint');
                 if (oldHint2) oldHint2.remove();
-                const hint = document.createElement('input');
-                hint.type = 'text';
+                const hint = document.createElement('div');
                 hint.className = 'queue-date-hint';
-                hint.value = calcDate || '请联系商务支持';
-                hint.disabled = true;
-                hint.style.cssText = 'width:100%;padding:12px 15px;border:1px solid #ddd;border-radius:8px;font-size:15px;background:#fff0f0;color:#e74c3c;font-weight:500;';
+                hint.textContent = calcDate;
+                hint.style.cssText = 'font-size:13px;color:#e74c3c;margin-top:4px;font-weight:500;';
                 parent.insertBefore(hint, queueDateInput.nextSibling);
             } else if (isDate) {
                 queueDateInput.style.display = '';
@@ -614,8 +617,7 @@ async function handleCreateOrder(e) {
     const isCalcDate = calculatedDate && calculatedDate.match(/\d{4}-\d{2}-\d{2}/);
     
     if (!isCalcDate && calculatedDate && calculatedDate !== '计算中...') {
-        // E列不是有效日期（如"请联系商务支持"），F列也写入相同文本
-        queueDate = calculatedDate;
+        queueDate = queueDateInput.value || calculatedDate;
     } else {
         // E列是有效日期，使用F列输入框的值
         queueDate = queueDateInput.value;
@@ -965,12 +967,13 @@ async function openEditModal(rowIndex) {
                 const calcDate = order.calculated_date || '';
                 const isDate = calcDate && calcDate.match(/^\d{4}-\d{2}-\d{2}$/);
                 const editQueueDateInput = document.getElementById('editQueueDate');
-                if (!isDate) {
-                    editQueueDateInput.disabled = true;
-                    editQueueDateInput.style.background = '#e9ecef';
-                    editQueueDateInput.style.cursor = 'not-allowed';
-                    editQueueDateInput.title = '可发货日期无效，无法编辑排队日期';
-                } else {
+                if (!isDate && calcDate !== '') {
+                    editQueueDateInput.disabled = false;
+                    editQueueDateInput.style.background = '#fff';
+                    editQueueDateInput.style.cursor = 'pointer';
+                    editQueueDateInput.title = '';
+                    editQueueDateInput.placeholder = '产能不足，请联系商务支持后填写';
+                } else if (isDate) {
                     editQueueDateInput.disabled = false;
                     editQueueDateInput.style.background = '#fff';
                     editQueueDateInput.style.cursor = 'pointer';
@@ -1246,6 +1249,15 @@ async function calculateDateForEdit() {
             if (isDate) {
                 document.getElementById('editQueueDate').value = calcDate;
                 document.getElementById('editDateHint').textContent = '';
+                document.getElementById('editQueueDate').disabled = false;
+                document.getElementById('editQueueDate').style.background = '#fff';
+                document.getElementById('editQueueDate').style.cursor = 'pointer';
+            } else if (calcDate) {
+                document.getElementById('editQueueDate').disabled = false;
+                document.getElementById('editQueueDate').style.background = '#fff';
+                document.getElementById('editQueueDate').style.cursor = 'pointer';
+                document.getElementById('editQueueDate').placeholder = '产能不足，联系商务支持后填写';
+                document.getElementById('editDateHint').textContent = calcDate;
             }
         } else {
             document.getElementById('editCalculatedDate').value = data.error || '计算失败';

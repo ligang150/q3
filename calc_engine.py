@@ -605,13 +605,11 @@ def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_
 
     i = bisect.bisect_left(sorted_dates, expected_date)
     if i >= len(sorted_dates):
-        max_data_date = sorted_dates[-1]
-        return "请联系商务支持", f"排产数据只到{max_data_date.strftime('%m月%d日')}，期望日期{expected_date_str}超出范围"
+        return "请联系商务支持", "请联系商务支持"
 
     j = bisect.bisect_right(sorted_dates, limit_date) - 1
     if j < i:
-        max_data_date = sorted_dates[-1]
-        return "请联系商务支持", f"排产数据只到{max_data_date.strftime('%m月%d日')}，期望日期{expected_date_str}超出范围"
+        return "请联系商务支持", "请联系商务支持"
 
     suffix_min = capacities[j]
     result_idx = -1
