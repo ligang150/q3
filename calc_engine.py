@@ -4,7 +4,8 @@
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, date
+from datetime import datetime, date
+import bisect
 import json
 import os
 import re
@@ -433,6 +434,10 @@ def get_sheet_data(sheet_id, start_row, capacity_col, limit_cell, row_count):
         "limit_date": limit_date
     }
 
+    if date_capacity_map:
+        result["sorted_dates"] = sorted(date_capacity_map.keys())
+        result["capacities"] = [date_capacity_map[d] for d in result["sorted_dates"]]
+
     _set_memory_cache(cache_key, result)
     return result
 
@@ -444,7 +449,7 @@ _LIMIT_DATE_CACHE_TTL = 300  # 5分钟
 # 计算结果缓存（型号+吨位+期望日期 → 结果）
 _calc_result_cache = {}
 _calc_result_cache_lock = threading.Lock()
-_CALC_RESULT_CACHE_TTL = 120  # 2分钟
+_CALC_RESULT_CACHE_TTL = 300  # 5分钟，与预加载间隔匹配
 
 # 空行缓存
 _empty_row_cache = {"row": 0, "timestamp": 0}
@@ -523,7 +528,6 @@ def _get_model_config(model):
 
 
 def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capacity=None):
-    """实际计算可发货日期（无缓存）"""
     config = _get_model_config(model)
     if not config:
         return "请联系商务支持", f"型号 {model} 暂无排产数据，请检查型号是否正确"
@@ -543,7 +547,6 @@ def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_
     limit_date = sheet_data["limit_date"]
 
     if not date_capacity_map:
-        # 数据为空时清除缓存，下次重试从API读取
         cache_key = f"{sheet_id}:{start_row}:{capacity_col}:{limit_cell}"
         _memory_cache.pop(cache_key, None)
         _preload_cache.pop(cache_key, None)
@@ -556,47 +559,37 @@ def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_
         else:
             return "请联系商务支持", "上限日期未设置且无排产数据"
 
-    # 按日期排序，只考虑期望日期到上限日期之间的日期
-    sorted_dates = sorted([d for d in date_capacity_map.keys() if expected_date <= d <= limit_date])
+    sorted_dates = sheet_data.get("sorted_dates")
+    capacities = sheet_data.get("capacities")
 
-    if not sorted_dates:
-        max_data_date = max(date_capacity_map.keys())
+    if sorted_dates is None or capacities is None:
+        sorted_dates = sorted(date_capacity_map.keys())
+        capacities = [date_capacity_map[d] for d in sorted_dates]
+
+    i = bisect.bisect_left(sorted_dates, expected_date)
+    if i >= len(sorted_dates):
+        max_data_date = sorted_dates[-1]
         return "请联系商务支持", f"排产数据只到{max_data_date.strftime('%m月%d日')}，期望日期{expected_date_str}超出范围"
 
-    # 1. 所有日期产能都 >= 吨位 → 返回期望日期
-    all_sufficient = all(date_capacity_map[d] >= tonnage for d in sorted_dates)
-    if all_sufficient:
-        return expected_date_str, ""
+    j = bisect.bisect_right(sorted_dates, limit_date) - 1
+    if j < i:
+        max_data_date = sorted_dates[-1]
+        return "请联系商务支持", f"排产数据只到{max_data_date.strftime('%m月%d日')}，期望日期{expected_date_str}超出范围"
 
-    # 2. 查找产能都 >= 吨位的连续区间，取最后一个区间的最小日期
-    intervals = []
-    current_start = None
-
-    for d in sorted_dates:
-        cap = date_capacity_map.get(d, 0)
-        if cap >= tonnage:
-            if current_start is None:
-                current_start = d
+    suffix_min = capacities[j]
+    result_idx = -1
+    for k in range(j, i - 1, -1):
+        cap = capacities[k]
+        suffix_min = min(cap, suffix_min)
+        if suffix_min >= tonnage:
+            result_idx = k
         else:
-            if current_start is not None:
-                intervals.append((current_start, d - timedelta(days=1)))
-                current_start = None
+            break
 
-    # 处理最后一个未关闭的区间
-    if current_start is not None:
-        intervals.append((current_start, sorted_dates[-1]))
-
-    if not intervals:
+    if result_idx < 0:
         return "请联系商务支持", "请联系商务支持"
 
-    # 取最后一个区间，必须包含上限日期
-    last_interval = intervals[-1]
-    last_end = last_interval[1]
-
-    if last_end < limit_date:
-        return "请联系商务支持", "请联系商务支持"
-
-    result_date = last_interval[0]
+    result_date = sorted_dates[result_idx]
 
     if result_date == expected_date:
         return expected_date_str, ""
@@ -715,6 +708,10 @@ def _preload_single_model(model, config):
             "date_capacity_map": date_capacity_map,
             "limit_date": limit_date
         }
+
+        if date_capacity_map:
+            result["sorted_dates"] = sorted(date_capacity_map.keys())
+            result["capacities"] = [date_capacity_map[d] for d in result["sorted_dates"]]
 
         _set_preload_cache(cache_key, result)
         date_col_cache_key = f"{sheet_id}:{start_row}"

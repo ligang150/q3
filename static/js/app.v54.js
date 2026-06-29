@@ -452,28 +452,28 @@ function setupEventListeners() {
     calcFieldsChange.forEach(fieldId => {
         const field = document.getElementById(fieldId);
         if (field) {
-            field.addEventListener('change', debounce(calculateDate, 300));
+            field.addEventListener('change', debounce(calculateDate, 150));
         }
     });
     const calcFieldsInput = ['tonnage', 'expectedDate'];
     calcFieldsInput.forEach(fieldId => {
         const field = document.getElementById(fieldId);
         if (field) {
-            field.addEventListener('input', debounce(calculateDate, 300));
+            field.addEventListener('input', debounce(calculateDate, 150));
             // 日期选择器在某些浏览器中只触发change不触发input，同时监听两者
-            field.addEventListener('change', debounce(calculateDate, 300));
+            field.addEventListener('change', debounce(calculateDate, 150));
         }
     });
     const calcModelInput = document.getElementById('modelInput');
     if (calcModelInput) {
-        calcModelInput.addEventListener('change', debounce(calculateDate, 300));
+        calcModelInput.addEventListener('change', debounce(calculateDate, 150));
     }
     // 修改页面自动计算
     const editCalcFields = ['editModel', 'editTonnage', 'editCustomer', 'editExpectedDate'];
     editCalcFields.forEach(fieldId => {
         const field = document.getElementById(fieldId);
         if (field) {
-            field.addEventListener('change', debounce(calculateDateForEdit, 300));
+            field.addEventListener('change', debounce(calculateDateForEdit, 150));
         }
     });
 }
