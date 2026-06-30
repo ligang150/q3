@@ -477,177 +477,86 @@ def read_sheet_range(sheet_id, range_str, file_id=None):
 
 
 def get_next_empty_row(sheet_id, start_from=2, max_batches=6):
-    """获取表格下一个空行号（1-based），从A列第一个空行开始扫描（跳过表头第1行）
-    优化：batch_size增大到500，减少API调用次数；添加30秒缓存
-    安全：start_from 参数允许调用方指定从哪行开始扫描，避免多人并发时依赖全局缓存
-    快速失败：API无响应时立即返回默认行号，避免阻塞请求
-    优化：逐行扫描改为50行批量扫描"""
+    """获取表格下一个空行号（1-based）。A列（型号）为空即空行。
+    同时读A:B范围防止API压缩，30秒缓存。"""
     global _empty_row_cache
     now = time.time()
-    # 缓存命中：30秒内直接返回缓存的空行位置
     if _empty_row_cache["row"] >= start_from and (now - _empty_row_cache["timestamp"]) < EMPTY_ROW_CACHE_TTL:
         return _empty_row_cache["row"]
 
-    batch_size = 500
+    batch_size = 200
     batches_done = 0
-    for offset in range(start_from - 1, 3000, batch_size):
+    for batch_start in range(start_from, 5000, batch_size):
         batches_done += 1
         if batches_done > max_batches:
             break
-        start = offset + 1  # 1-based
-        end = offset + batch_size
-        range_str = f"A{start}:A{end}"
+        batch_end = batch_start + batch_size - 1
+        range_str = f"A{batch_start}:B{batch_end}"
         grid_data = read_sheet_range(sheet_id, range_str)
         rows = grid_data.get("rows", [])
 
-        # API返回空数据时立即终止，避免无效扫描
         if not rows:
-            break
+            result = batch_start
+            _empty_row_cache = {"row": result, "timestamp": now}
+            return result
 
-        for i in range(len(rows)):
-            row = rows[i]
-            actual_row = start + i  # 1-based实际行号
+        for i, row in enumerate(rows):
+            actual_row = batch_start + i
             if actual_row < 2:
-                continue  # 跳过表头
-            has_data = False
-            for v in row.get("values", []):
-                cv = v.get("cellValue")
-                if cv:
-                    text = parse_cell_value(cv)
-                    if text.strip():
-                        has_data = True
-                        break
-            if not has_data:
+                continue
+            values = row.get("values", [])
+            if not values:
+                _empty_row_cache = {"row": actual_row, "timestamp": now}
+                return actual_row
+            cv_a = values[0].get("cellValue")
+            if not cv_a or not parse_cell_value(cv_a).strip():
                 _empty_row_cache = {"row": actual_row, "timestamp": now}
                 return actual_row
 
-        # 返回数据不足一个批次，可能是已到表格末尾，也可能是中间有空行（API压缩格式）
         if len(rows) < batch_size:
-            candidate = start + len(rows)
-            # 验证候选行是否真的是空的（防御API压缩格式导致行号计算错误）
+            candidate = batch_start + len(rows)
             cell_val = read_single_cell(sheet_id, f"A{candidate}")
             if not cell_val or not cell_val.strip():
                 _empty_row_cache = {"row": candidate, "timestamp": now}
                 return candidate
-            # 候选行已有数据，说明中间有空行，用50行批量扫描精确定位（替代逐行读取）
-            scan_batch = 50
-            for scan_start in range(start, candidate + 1, scan_batch):
-                scan_end = min(scan_start + scan_batch - 1, candidate)
-                scan_range = f"A{scan_start}:A{scan_end}"
-                scan_grid = read_sheet_range(sheet_id, scan_range)
-                scan_rows = scan_grid.get("rows", [])
-                for j in range(len(scan_rows)):
-                    scan_row = scan_rows[j]
-                    scan_actual_row = scan_start + j
-                    if scan_actual_row < 2:
-                        continue
-                    scan_has_data = False
-                    for v in scan_row.get("values", []):
-                        cv = v.get("cellValue")
-                        if cv:
-                            text = parse_cell_value(cv)
-                            if text.strip():
-                                scan_has_data = True
-                                break
-                    if not scan_has_data:
-                        _empty_row_cache = {"row": scan_actual_row, "timestamp": now}
-                        return scan_actual_row
-            # 该批次内没找到空行，继续下一批
             continue
 
-    # 扫描失败或达到上限，返回一个安全的默认行号
-    default_row = start_from
-    _empty_row_cache = {"row": default_row, "timestamp": now}
-    return default_row
-
-
+    return start_from
 def _find_first_empty_row_in_column_a():
-    """提交排队时实时扫描A列，找到第一个真正的空行（1-based）
-    不使用缓存，每次都是最新数据。API失败自动重试，最终失败时返回None让调用方扩容
-    优化：batch_size从100增大到500，减少API调用次数；逐行扫描改为50行批量扫描"""
-    batch_size = 500
-    max_retries = 2
+    """提交排队时实时扫描A列，找到第一个空行（1-based）。
+    判断标准：A列（型号）为空即视为空行。
+    同时读A:B范围防止API压缩空行导致行号错位。
+    找到候选后二次验证单单元格确认，避免覆盖已有数据。"""
+    batch_size = 200
 
-    for attempt in range(max_retries + 1):
-        all_batches_empty = True  # 标记是否所有批次都没有数据
-        for offset in range(0, 3000, batch_size):
-            start = offset + 1  # 1-based
-            end = offset + batch_size
-            range_str = f"A{start}:A{end}"
-            grid_data = read_sheet_range(SHEET_ID, range_str)
-            rows = grid_data.get("rows", [])
+    for batch_start in range(2, 5000, batch_size):
+        batch_end = batch_start + batch_size - 1
+        range_str = f"A{batch_start}:B{batch_end}"
+        grid_data = read_sheet_range(SHEET_ID, range_str)
+        rows = grid_data.get("rows", [])
 
-            if not rows:
-                # API返回空：如果这是第一个批次且第一次尝试，可能是API故障，重试整个扫描
-                if offset == 0 and attempt < max_retries:
-                    time.sleep(0.3)
-                    break  # 跳出内层循环，触发外层重试
-                # 非第一个批次返回空，说明已到表格末尾，下一行是空行
-                if offset > 0:
-                    return start
-                # 第一个批次多次重试后仍为空，表格可能真的没有数据或API故障
-                if attempt >= max_retries:
-                    # 兜底：假设表格只有表头，从第2行开始
-                    return 2
+        if not rows:
+            return batch_start
+
+        for i, row in enumerate(rows):
+            actual_row = batch_start + i
+            if actual_row < 2:
                 continue
+            values = row.get("values", [])
+            if not values:
+                return actual_row
+            cv_a = values[0].get("cellValue")
+            if not cv_a or not parse_cell_value(cv_a).strip():
+                return actual_row
 
-            all_batches_empty = False
-
-            for i in range(len(rows)):
-                row = rows[i]
-                actual_row = start + i
-                if actual_row < 2:
-                    continue
-                has_data = False
-                for v in row.get("values", []):
-                    cv = v.get("cellValue")
-                    if cv:
-                        text = parse_cell_value(cv)
-                        if text.strip():
-                            has_data = True
-                            break
-                if not has_data:
-                    return actual_row
-
-            # 返回数据不足一个批次，可能是已到表格末尾，也可能是中间有空行（API压缩格式）
-            if len(rows) < batch_size:
-                candidate = start + len(rows)
-                # 验证候选行是否真的是空的（防御API压缩格式导致行号计算错误）
-                cell_val = read_single_cell(SHEET_ID, f"A{candidate}")
-                if not cell_val or not cell_val.strip():
-                    return candidate
-                # 候选行已有数据，说明中间有空行，用50行批量扫描精确定位（替代逐行读取）
-                scan_batch = 50
-                for scan_start in range(start, candidate + 1, scan_batch):
-                    scan_end = min(scan_start + scan_batch - 1, candidate)
-                    scan_range = f"A{scan_start}:A{scan_end}"
-                    scan_grid = read_sheet_range(SHEET_ID, scan_range)
-                    scan_rows = scan_grid.get("rows", [])
-                    for j in range(len(scan_rows)):
-                        scan_row = scan_rows[j]
-                        scan_actual_row = scan_start + j
-                        if scan_actual_row < 2:
-                            continue
-                        scan_has_data = False
-                        for v in scan_row.get("values", []):
-                            cv = v.get("cellValue")
-                            if cv:
-                                text = parse_cell_value(cv)
-                                if text.strip():
-                                    scan_has_data = True
-                                    break
-                        if not scan_has_data:
-                            return scan_actual_row
-                # 该批次内没找到空行，继续下一批
-                continue
-
-        # 所有批次扫描完毕，没找到空行
-        if all_batches_empty and attempt < max_retries:
-            time.sleep(0.3)
+        if len(rows) < batch_size:
+            candidate = batch_start + len(rows)
+            verify_val = read_single_cell(SHEET_ID, f"A{candidate}")
+            if not verify_val or not verify_val.strip():
+                return candidate
             continue
-        return None
 
-    return None  # 表格已满，需要扩容
+    return None
 
 
 def batch_update(requests_body):
@@ -1377,6 +1286,14 @@ def create_order():
 
         # 确保行数足够
         ensure_sheet_rows(target_row + 10)
+
+        # 写入前二次验证目标行确为空，防止API压缩导致行号错位覆盖已有数据
+        verify_val = read_single_cell(SHEET_ID, f"A{target_row}")
+        if verify_val and verify_val.strip():
+            print(f"[create_order] 行{target_row}已有数据({verify_val})，重新扫描空行", flush=True)
+            target_row = _find_first_empty_row_in_column_a()
+            if target_row is None:
+                return jsonify({"success": False, "error": "表格已满，请联系管理员"})
 
         # 写入完整数据（不覆盖E列）
         write_row_idx = target_row - 1
