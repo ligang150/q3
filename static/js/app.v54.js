@@ -1267,7 +1267,6 @@ async function calculateDateForEdit() {
                     document.getElementById('editDateHint').style.color = '';
                 }
             }
-            }
         } else {
             document.getElementById('editCalculatedDate').value = data.error || '计算失败';
         }
