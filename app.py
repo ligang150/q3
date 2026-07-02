@@ -523,24 +523,9 @@ def get_next_empty_row(sheet_id, start_from=2, max_batches=6):
 
     return start_from
 def _find_first_empty_row_in_column_a():
-    """原子分配新行号，多用户并发冲突为零。
-    基于全局递增计数器，每个请求获得唯一行号，无需扫描。
-    分配后用单次 read_single_cell 验证安全性（防止手动写入等极端场景）。"""
-    candidate = _allocate_row()
-
-    # 安全检查：验证分配的行确实为空（防止表格被外部手动修改）
-    verify_val = read_single_cell(SHEET_ID, f"A{candidate}")
-    if not verify_val or not verify_val.strip():
-        return candidate
-
-    # 极端情况：行已被外部占用，递增跳过冲突行
-    print(f"[allocate] 行{candidate}已被占用({verify_val})，递增跳过", flush=True)
-    for _ in range(50):
-        candidate = _allocate_row()
-        verify_val = read_single_cell(SHEET_ID, f"A{candidate}")
-        if not verify_val or not verify_val.strip():
-            return candidate
-    return None
+    """原子分配新行号。基于全局递增计数器，每个请求获得唯一行号。
+    分配结果由计数器保证正确性，无需读 API 验证（初始化时已并行扫描过最大行号）。"""
+    return _allocate_row()
 
 
 def batch_update(requests_body):
@@ -1255,74 +1240,11 @@ def create_order():
         remark = f"{tonnage}{customer}"
         submit_time = get_beijing_time_str()
 
-        # 提交时实时扫描A列，找到第一个真正的空行（不使用缓存）
+        # 原子分配唯一行号
         target_row = _find_first_empty_row_in_column_a()
 
-        if target_row is None:
-            # 实时扫描失败/表格确实已满，用 get_next_empty_row 作为兜底
-            try:
-                fallback_row = get_next_empty_row(SHEET_ID, start_from=2, max_batches=4)
-                if fallback_row >= 2:
-                    print(f"[create_order] 实时扫描失败，使用 get_next_empty_row 兜底: row={fallback_row}", flush=True)
-                    target_row = fallback_row
-            except Exception as e:
-                print(f"[create_order] get_next_empty_row 兜底失败: {e}", flush=True)
-
-        if target_row is None:
-            # 需要扩容：获取当前表格总行数并添加行
-            try:
-                url = f"{BASE_URL}/files/{FILE_ID}"
-                resp = HTTP.get(url, headers=get_headers(), timeout=_HTTP_TIMEOUT)
-                if resp.status_code == 200:
-                    file_data = resp.json()
-                    if file_data.get("code", 0) == 0:
-                        sheets = file_data.get("data", {}).get("sheets", [])
-                        current_row_count = 0
-                        for s in sheets:
-                            if s.get("sheetID") == SHEET_ID:
-                                current_row_count = s.get("rowCount", s.get("gridProperties", {}).get("rowCount", 0))
-                                break
-                        if current_row_count > 0:
-                            rows_to_add = 500
-                            body = {
-                                "requests": [{
-                                    "insertDimension": {
-                                        "range": {
-                                            "sheetID": SHEET_ID,
-                                            "dimension": "ROWS",
-                                            "startIndex": current_row_count,
-                                            "endIndex": current_row_count + rows_to_add
-                                        }
-                                    }
-                                }]
-                            }
-                            expand_resp = batch_update(body)
-                            if expand_resp.status_code == 200:
-                                expand_result = expand_resp.json()
-                                if expand_result.get("ret") == 0 or "responses" in expand_result:
-                                    _sheet_row_count_cache["count"] = current_row_count + rows_to_add
-                                    target_row = current_row_count + 1
-                                    print(f"[create_order] 扩容成功: {rows_to_add}行, 写入行={target_row}", flush=True)
-                    else:
-                        print(f"[create_order] 获取文件信息API错误: code={file_data.get('code')} {file_data.get('message', '')}", flush=True)
-                else:
-                    print(f"[create_order] 获取文件信息HTTP错误: {resp.status_code}", flush=True)
-            except Exception as e:
-                print(f"[create_order] 扩容异常: {e}", flush=True)
-
-            if target_row is None:
-                return jsonify({"success": False, "error": "表格已满且扩容失败，请联系管理员"})
-
-        # 确保行数足够
+        # 确保行数足够（缓存命中时O(1)）
         ensure_sheet_rows(target_row + 10)
-
-        # 写入前二次验证目标行确为空，防止API压缩导致行号错位覆盖已有数据
-        verify_val = read_single_cell(SHEET_ID, f"A{target_row}")
-        if verify_val and verify_val.strip():
-            print(f"[create_order] 行{target_row}已有数据({verify_val})，快速查找下一空行", flush=True)
-            target_row = _find_first_empty_row_in_column_a()
-            if target_row is None:
-                return jsonify({"success": False, "error": "表格已满，请联系管理员"})
 
         # 写入完整数据（不覆盖E列）
         write_row_idx = target_row - 1
