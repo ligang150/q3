@@ -523,58 +523,23 @@ def get_next_empty_row(sheet_id, start_from=2, max_batches=6):
 
     return start_from
 def _find_first_empty_row_in_column_a():
-    """快速定位A列第一个空行（1-based）。
-    优先尝试缓存的最近写入行+1，命中则只需1次API调用；
-    未命中时并行扫描多批次，大幅减少等待时间。"""
-    batch_size = 200
+    """原子分配新行号，多用户并发冲突为零。
+    基于全局递增计数器，每个请求获得唯一行号，无需扫描。
+    分配后用单次 read_single_cell 验证安全性（防止手动写入等极端场景）。"""
+    candidate = _allocate_row()
 
-    # 优先尝试缓存的最近写入行+1（大多数情况下只需1次API调用）
-    with _last_written_row_lock:
-        cached_next = _last_written_row["row"] + 1
-    if cached_next >= 2:
-        verify_val = read_single_cell(SHEET_ID, f"A{cached_next}")
+    # 安全检查：验证分配的行确实为空（防止表格被外部手动修改）
+    verify_val = read_single_cell(SHEET_ID, f"A{candidate}")
+    if not verify_val or not verify_val.strip():
+        return candidate
+
+    # 极端情况：行已被外部占用，递增跳过冲突行
+    print(f"[allocate] 行{candidate}已被占用({verify_val})，递增跳过", flush=True)
+    for _ in range(50):
+        candidate = _allocate_row()
+        verify_val = read_single_cell(SHEET_ID, f"A{candidate}")
         if not verify_val or not verify_val.strip():
-            return cached_next
-
-    # 缓存未命中，并行扫描 A:B 列（4线程，每批200行，最多扫描5000行）
-    scan_ranges = []
-    for batch_start in range(2, 5000, batch_size):
-        batch_end = batch_start + batch_size - 1
-        scan_ranges.append((batch_start, batch_end))
-
-    batch_results = {}  # batch_start -> rows
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {
-            executor.submit(read_sheet_range, SHEET_ID, f"A{s}:B{e}"): s
-            for s, e in scan_ranges
-        }
-        for future in as_completed(futures):
-            start = futures[future]
-            grid_data = future.result()
-            rows = grid_data.get("rows", [])
-            batch_results[start] = rows
-
-    # 按起始行排序，找到第一个空行
-    for start in sorted(batch_results.keys()):
-        rows = batch_results[start]
-        if not rows:
-            return start
-        for i, row in enumerate(rows):
-            actual_row = start + i
-            if actual_row < 2:
-                continue
-            values = row.get("values", [])
-            if not values:
-                return actual_row
-            cv_a = values[0].get("cellValue")
-            if not cv_a or not parse_cell_value(cv_a).strip():
-                return actual_row
-        if len(rows) < batch_size:
-            candidate = start + len(rows)
-            verify_val = read_single_cell(SHEET_ID, f"A{candidate}")
-            if not verify_val or not verify_val.strip():
-                return candidate
-
+            return candidate
     return None
 
 
@@ -976,9 +941,50 @@ _TEMP_ROW_TIMEOUT = 300  # 5分钟超时（秒）
 _sheet_row_count_cache = {"count": 0}
 _sheet_row_count_lock = threading.Lock()
 
-# 最近写入行号缓存：提交排队时优先尝试下一行，避免每次全表扫描
-_last_written_row = {"row": 0}
-_last_written_row_lock = threading.Lock()
+# 原子行号分配器：多用户并发时每个请求获得唯一行号，杜绝争抢同一行
+_next_row_counter = {"value": 0, "initialized": False}
+_next_row_lock = threading.Lock()
+
+
+def _scan_max_row_in_a():
+    """并行扫描 A 列找到当前最大数据行号，用于首次初始化计数器"""
+    batch_size = 200
+    scan_ranges = []
+    for s in range(2, 5000, batch_size):
+        scan_ranges.append((s, s + batch_size - 1))
+
+    batch_results = {}
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(read_sheet_range, SHEET_ID, f"A{s}:A{e}"): s for s, e in scan_ranges}
+        for future in as_completed(futures):
+            start = futures[future]
+            rows = future.result().get("rows", [])
+            batch_results[start] = rows
+
+    max_row = 1
+    for start in sorted(batch_results.keys()):
+        rows = batch_results[start]
+        for i, row in enumerate(rows):
+            values = row.get("values", [])
+            if values and values[0].get("cellValue"):
+                text = parse_cell_value(values[0]["cellValue"])
+                if text.strip():
+                    max_row = max(max_row, start + i)
+    return max_row
+
+
+def _allocate_row():
+    """原子分配新行号，多用户并发安全。
+    首次调用自动扫描当前最大行号初始化计数器。
+    返回唯一的、递增的行号（1-based）。"""
+    with _next_row_lock:
+        if not _next_row_counter["initialized"]:
+            max_row = _scan_max_row_in_a()
+            _next_row_counter["value"] = max_row
+            _next_row_counter["initialized"] = True
+            print(f"[allocate] 计数器初始化: 当前最大行={max_row}", flush=True)
+        _next_row_counter["value"] += 1
+        return _next_row_counter["value"]
 
 def _get_pending_rows():
     """获取所有待处理行（F列为空的行），带缓存"""
@@ -1335,10 +1341,6 @@ def create_order():
                 with _temp_row_lock:
                     if temp_key in _temp_row_tracker:
                         del _temp_row_tracker[temp_key]
-                # 更新最近写入行缓存，下次提交排队优先尝试下一行
-                with _last_written_row_lock:
-                    if target_row > _last_written_row["row"]:
-                        _last_written_row["row"] = target_row
                 clear_order_caches()
                 return jsonify({"success": True, "message": "订单创建成功", "row": target_row})
             return jsonify({"success": False, "error": "写入0个单元格"})
