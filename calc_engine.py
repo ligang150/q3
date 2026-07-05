@@ -631,7 +631,17 @@ def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_
                         cap += old_tonnage
                     adjusted.append(cap)
                 capacities = adjusted
-                print(f"[calc-adj] 产能回补: model={model} old_qd={old_qd_str} tonnage={old_tonnage} range=[{old_qd},{limit_date}] dates_affected={sum(1 for d in sorted_dates if old_qd<=d<=limit_date)}", flush=True)
+                affected = sum(1 for d in sorted_dates if old_qd <= d <= limit_date)
+                print(f"[calc-adj] 产能回补: model={model} old_qd={old_qd_str} tonnage={old_tonnage} range=[{old_qd},{limit_date}] dates_affected={affected}", flush=True)
+                # 详细日志：输出前5天产能变化
+                log_count = 0
+                for idx, d in enumerate(sorted_dates):
+                    if old_qd <= d <= limit_date:
+                        print(f"[calc-trace] idx={idx} date={d} capacity={capacities[idx]:.1f} (after +{old_tonnage})", flush=True)
+                        log_count += 1
+                        if log_count >= 5:
+                            print(f"[calc-trace] ... (showing first 5 of {affected} affected days)", flush=True)
+                            break
 
     i = bisect.bisect_left(sorted_dates, expected_date)
     if i >= len(sorted_dates):
@@ -641,6 +651,8 @@ def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_
     if j < i:
         return "请联系商务支持", "请联系商务支持"
 
+    print(f"[calc-search] model={model} tonnage={tonnage} expected_date={expected_date} limit_date={limit_date} search_range=[{i}:{sorted_dates[i] if i<len(sorted_dates) else 'N/A'}..{j}:{sorted_dates[j] if j<len(sorted_dates) else 'N/A'}]", flush=True)
+
     suffix_min = capacities[j]
     result_idx = -1
     for k in range(j, i - 1, -1):
@@ -649,12 +661,15 @@ def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_
         if suffix_min >= tonnage:
             result_idx = k
         else:
+            print(f"[calc-search] BREAK at k={k} date={sorted_dates[k]} cap={cap:.1f} suffix_min={suffix_min:.1f} tonnage={tonnage} → suffix_min < tonnage", flush=True)
             break
 
     if result_idx < 0:
+        print(f"[calc-search] NO RESULT: no date found with suffix_min >= {tonnage}", flush=True)
         return "请联系商务支持", "请联系商务支持"
 
     result_date = sorted_dates[result_idx]
+    print(f"[calc-search] RESULT: result_idx={result_idx} date={result_date} suffix_min={suffix_min:.1f}", flush=True)
 
     if result_date == expected_date:
         return expected_date_str, ""

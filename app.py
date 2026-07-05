@@ -1781,19 +1781,19 @@ def update_order(row_index):
         else:
             return jsonify({"success": False, "error": "订单不存在"})
 
-        # 提取原始排队日期（F列）和吨位：已排队订单修改时需将旧吨位回补至产能计算
+        # 提取原始排队日期（F列）和原始吨位：已排队订单修改时需将旧吨位回补至产能计算
         original_queue_date = orig_values[5] if len(orig_values) > 5 else ""
         occupied = None
         if original_queue_date and is_date_string(original_queue_date):
             try:
-                new_tonnage_val = parse_number(tonnage)
-                if new_tonnage_val and new_tonnage_val > 0:
-                    occupied = {"date": original_queue_date, "tonnage": new_tonnage_val}
-                    print(f"[update-order] 产能回补: model={model} old_qd={original_queue_date} tonnage={new_tonnage_val}", flush=True)
+                original_tonnage_val = parse_number(original_tonnage)
+                if original_tonnage_val and original_tonnage_val > 0:
+                    occupied = {"date": original_queue_date, "tonnage": original_tonnage_val}
+                    print(f"[update-order] 产能回补: model={model} row={row_index} old_qd={original_queue_date} original_tonnage={original_tonnage_val} new_tonnage={parse_number(tonnage)}", flush=True)
             except Exception:
                 pass
         else:
-            print(f"[update-order] 未触发产能回补: queue_date='{original_queue_date}' is_date={is_date_string(original_queue_date)}", flush=True)
+            print(f"[update-order] 未触发产能回补: row={row_index} queue_date='{original_queue_date}' is_date={is_date_string(original_queue_date)}", flush=True)
 
         # 更新（row_index是1-based，转为0-based）
         write_idx = row_index - 1
