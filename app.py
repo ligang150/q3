@@ -9,7 +9,7 @@ import functools
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from calc_engine import MODEL_CONFIG, calculate_delivery_date, set_token_getter, start_preload_thread, refresh_capacity_data, read_single_cell
+from calc_engine import MODEL_CONFIG, calculate_delivery_date, set_token_getter, start_preload_thread, refresh_capacity_data, read_single_cell, parse_number
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -1781,10 +1781,21 @@ def update_order(row_index):
         else:
             return jsonify({"success": False, "error": "订单不存在"})
 
+        # 提取原始排队日期（F列）和吨位：已排队订单修改时需将旧吨位回补至产能计算
+        original_queue_date = orig_values[5] if len(orig_values) > 5 else ""
+        occupied = None
+        if original_queue_date and is_date_string(original_queue_date):
+            try:
+                old_tonnage_val = parse_number(original_tonnage)
+                if old_tonnage_val and old_tonnage_val > 0:
+                    occupied = {"date": original_queue_date, "tonnage": old_tonnage_val}
+            except Exception:
+                pass
+
         # 更新（row_index是1-based，转为0-based）
         write_idx = row_index - 1
         # 计算可发货日期（用于写入E列）
-        calc_date_for_update, calc_error = calculate_delivery_date(model, tonnage, expected_date)
+        calc_date_for_update, calc_error = calculate_delivery_date(model, tonnage, expected_date, occupied)
 
         # 可发货日期为"请联系商务支持"时禁止保存
         if calc_date_for_update and calc_date_for_update == "请联系商务支持":

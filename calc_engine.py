@@ -603,6 +603,21 @@ def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_
         sorted_dates = sorted(date_capacity_map.keys())
         capacities = [date_capacity_map[d] for d in sorted_dates]
 
+    # 修改排队时：将已排队订单的旧吨位加回产能（避免重复扣减）
+    if occupied_capacity:
+        old_qd_str = occupied_capacity.get("date")
+        old_tonnage = occupied_capacity.get("tonnage", 0)
+        if old_qd_str and old_tonnage > 0:
+            old_qd = parse_date(old_qd_str)
+            if old_qd:
+                adjusted = []
+                for idx, d in enumerate(sorted_dates):
+                    cap = capacities[idx]
+                    if old_qd <= d <= limit_date:
+                        cap += old_tonnage
+                    adjusted.append(cap)
+                capacities = adjusted
+
     i = bisect.bisect_left(sorted_dates, expected_date)
     if i >= len(sorted_dates):
         return "请联系商务支持", "请联系商务支持"
@@ -633,20 +648,21 @@ def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_
 
 def calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capacity=None):
     """计算可发货日期（带计算结果缓存）"""
-    # 1. 计算结果缓存快速路径
     cache_key = f"{model}:{tonnage_str}:{expected_date_str}"
     now = time_module.time()
-    with _calc_result_cache_lock:
-        if cache_key in _calc_result_cache:
-            entry = _calc_result_cache[cache_key]
-            if now - entry["ts"] < _CALC_RESULT_CACHE_TTL:
-                return entry["result"]
 
-    # 2. 实际计算
+    # 修改排队时不使用缓存（产能调整是订单特定的，缓存无意义）
+    if not occupied_capacity:
+        with _calc_result_cache_lock:
+            if cache_key in _calc_result_cache:
+                entry = _calc_result_cache[cache_key]
+                if now - entry["ts"] < _CALC_RESULT_CACHE_TTL:
+                    return entry["result"]
+
     result = _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_capacity)
 
-    # 3. 写入缓存（仅成功计算时）
-    if result[0]:  # 有可发货日期或错误提示时缓存
+    # 仅正常计算缓存结果（修改排队的结果不缓存）
+    if result[0] and not occupied_capacity:
         with _calc_result_cache_lock:
             _calc_result_cache[cache_key] = {"result": result, "ts": now}
 
