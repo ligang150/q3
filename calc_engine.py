@@ -579,6 +579,20 @@ def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_
 
     sheet_id, start_row, capacity_col, limit_cell, row_count = config
 
+    # 修改排队时：先清除该型号的缓存，确保从API读取最新产能数据
+    if occupied_capacity:
+        cache_key = f"{sheet_id}:{start_row}:{capacity_col}:{limit_cell}"
+        _preload_cache.pop(cache_key, None)
+        _memory_cache.pop(cache_key, None)
+        # 清除上限日期缓存
+        limit_cache_key = f"{sheet_id}:{limit_cell}"
+        _limit_date_cache.pop(limit_cache_key, None)
+        # 同时清除A列日期原始缓存
+        with _sheet_date_raw_lock:
+            date_raw_keys = [k for k in _sheet_date_raw_cache if k.startswith(f"{sheet_id}:")]
+            for k in date_raw_keys:
+                _sheet_date_raw_cache.pop(k, None)
+
     sheet_data = get_sheet_data(sheet_id, start_row, capacity_col, limit_cell, row_count)
     date_capacity_map = sheet_data["date_capacity_map"]
     limit_date = sheet_data["limit_date"]
