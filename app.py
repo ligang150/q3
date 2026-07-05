@@ -50,7 +50,7 @@ ACCESS_PASSWORD = os.environ.get('ACCESS_PASSWORD', 'queue2025')
 ADMIN_EMPLOYEE_ID = "20150465"
 ADMIN_KEYS = ["TENCENT_ACCESS_TOKEN", "RENDER_API_KEY", "GITHUB_TOKEN"]
 RENDER_API_KEY_BOOTSTRAP = os.environ.get("RENDER_API_KEY", "")
-RENDER_SERVICE_ID = os.environ.get("RENDER_SERVICE_ID", "srv-d8l6eet7vvec73evlu7g")
+RENDER_SERVICE_ID = os.environ.get("RENDER_SERVICE_ID", "srv-d9355qmh2hms73dal0p0")
 GITHUB_TOKEN_BOOTSTRAP = os.environ.get("GITHUB_TOKEN", "")
 
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -1786,11 +1786,14 @@ def update_order(row_index):
         occupied = None
         if original_queue_date and is_date_string(original_queue_date):
             try:
-                old_tonnage_val = parse_number(original_tonnage)
-                if old_tonnage_val and old_tonnage_val > 0:
-                    occupied = {"date": original_queue_date, "tonnage": old_tonnage_val}
+                new_tonnage_val = parse_number(tonnage)
+                if new_tonnage_val and new_tonnage_val > 0:
+                    occupied = {"date": original_queue_date, "tonnage": new_tonnage_val}
+                    print(f"[update-order] 产能回补: model={model} old_qd={original_queue_date} tonnage={new_tonnage_val}", flush=True)
             except Exception:
                 pass
+        else:
+            print(f"[update-order] 未触发产能回补: queue_date='{original_queue_date}' is_date={is_date_string(original_queue_date)}", flush=True)
 
         # 更新（row_index是1-based，转为0-based）
         write_idx = row_index - 1

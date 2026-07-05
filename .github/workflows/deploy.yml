@@ -10,7 +10,7 @@ jobs:
     steps:
       - name: Trigger Render Deploy
         run: |
-          curl -X POST "https://api.render.com/v1/services/srv-d8l6eet7vvec73evlu7g/deploys" \
+          curl -X POST "https://api.render.com/v1/services/srv-d9355qmh2hms73dal0p0/deploys" \
             -H "Authorization: Bearer rnd_sPejtkY8asOJ7D5Wvdgztmn8fCWC" \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \

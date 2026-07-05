@@ -617,6 +617,7 @@ def _do_calculate_delivery_date(model, tonnage_str, expected_date_str, occupied_
                         cap += old_tonnage
                     adjusted.append(cap)
                 capacities = adjusted
+                print(f"[calc-adj] 产能回补: model={model} old_qd={old_qd_str} tonnage={old_tonnage} range=[{old_qd},{limit_date}] dates_affected={sum(1 for d in sorted_dates if old_qd<=d<=limit_date)}", flush=True)
 
     i = bisect.bisect_left(sorted_dates, expected_date)
     if i >= len(sorted_dates):
